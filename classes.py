@@ -114,6 +114,20 @@ class Fluid:
             st.warning(f"Could not get critical pressure for {self.name}. Using default value.")
             return 22064000  # Default value (approximately 220 bar)
 
+    def get_vapour_pressure(self) -> float:
+        """
+        Get vapour pressure of the fluid.
+
+        Returns
+            float: Vapour pressure in Pa
+        """
+        try:
+            return PropsSI('P', 'Q', 1, 'T', self.T, self.name)
+        except:
+            st.warning(f"Could not get vapour pressure for {self.name}. Using default value.")
+            return 0.0
+
+
 
 class ValveProperties:
     def __init__(self):
@@ -415,6 +429,10 @@ class Valve:
         # Initialize other parameters that will be calculated
         self.FP = None
         self.FR = None
+        self.pc = None
+        self.pv = None
+        self.FF = None
+        self.choking_delta_p = None
         self.Reynolds_number = None
         self.Cv = None
         self.Kv = None
@@ -422,11 +440,12 @@ class Valve:
         self.is_choked = None
 
         # Constants for conversion
-        self.N1 = 0.0865  # For metric units (m³/h, kPa, kg/m³)
-        self.N2 = 1.0  # For metric units
-        self.N4 = 76.0  # For metric units (Cv to Kv conversion)
+        self.N1 = 0.1  # For metric units (m³/h, kPa, kg/m³)
+        self.N2 = 1.6*1e-3  # For metric units
+        self.N4 = 7.07*1e-2  # For metric units (Cv to Kv conversion)
         self.N19 = 2.5  # For metric units (Kv calculation)
-        self.N32 = 1.0  # For metric units (gas flow)
+        self.N32 = 1.4e2  # For metric units (gas flow)
+        self.rho0 = PropsSI('D', 'P', 101325, 'T', 288.15, 'water')  # Reference density for liquid
 
     def calculate_fp(self):
         """
@@ -443,24 +462,43 @@ class Valve:
         else:
             return 1.0 / (1.0 - (d1 / D1) ** 4) ** 0.5
 
-    def calculate_reynolds_number(self, flow_rate, C):
+    def calculate_FF(self):
+        """
+        Calculate FF, critical pressure and vapour pressure of the fluid.
+
+        Returns:
+            float: FF
+            float: critical pressure
+            float: vapour pressure
+        """
+        try:
+            self.pc = self.fluid.get_critical_pressure()
+            self.pv = self.fluid.get_vapour_pressure()
+            self.FF = 0.96 - 0.28*(self.pv/self.pc)**0.5
+        except:
+            st.warning(f"Could not calculate FF for {self.fluid.name}. Using default value.")
+            self.FF = 0.0
+        return self.FF, self.pv, self.pc
+
+
+    def calculate_reynolds_number(self, flow_rate):
         """
         Calculate Reynolds number using equation 28 from ISA 75.01.
 
         Args:
             flow_rate: Flow rate in m³/h
-            C: Flow coefficient (Cv)
 
         Returns:
             float: Reynolds number
         """
+        N2 = self.N2
         N4 = self.N4
         Fd = self.Fd
         density = self.fluid.get_density()
         viscosity = self.fluid.get_viscosity()
 
         # Reynolds number calculation (equation 28)
-        return (N4 * flow_rate) / (Fd * C * viscosity / density)
+        return (N4 * Fd*  flow_rate)/(viscosity/density*(self.Kv * self.FL)**0.5)*((self.Kv**2*self.FL**2)/(N2*self.pipe_diameter**4)+1)**0.25
 
     def check_if_choked_liquid(self, delta_p, p1):
         """
@@ -476,11 +514,20 @@ class Valve:
         FL = self.FL
         FP = self.FP if self.FP is not None else self.calculate_fp()
 
+        # Calculate FF and get critical/vapor pressures
+        self.calculate_FF()  # This will set self.FF, self.pv, and self.pc
+
+        # Use the calculated values
+        FF = self.FF if self.FF is not None else 0.0
+        pv = self.pv if self.pv is not None else 0.0
+
         # Store FP value
         self.FP = FP
 
-        # Choked flow check: ΔP ≥ FL²·FP²·P1
-        return delta_p >= ((FL * FP) ** 2) * p1
+        self.choking_delta_p = FL**2 * (p1 - FF * pv)
+
+        # Choked flow check: ΔP ≥ FL²·FP²·(P1 - FF·Pv)
+        return delta_p >= self.choking_delta_p, self.choking_delta_p
 
     def check_if_choked_gas(self, x, Fk):
         """
@@ -496,7 +543,7 @@ class Valve:
         # Choked flow check: x ≥ Fk·Xt
         return x >= (Fk * self.Xt)
 
-    def calculate_cv_liquid_non_choked(self, flow_rate, delta_p, p1, gravity=1.0):
+    def calculate_cv_liquid_non_choked(self, flow_rate, delta_p, p1):
         """
         Calculate Cv for non-choked liquid flow using equation 1 from ISA 75.01.
 
@@ -504,13 +551,15 @@ class Valve:
             flow_rate: Flow rate in m³/h
             delta_p: Pressure differential (p1-p2) in Pa
             p1: Inlet pressure in Pa
-            gravity: Specific gravity of liquid
+            rho0: reference density of liquid in kg/m³
 
         Returns:
             float: Flow coefficient (Cv)
         """
         N1 = self.N1
+        FL = self.FL
         FP = self.FP if self.FP is not None else self.calculate_fp()
+        rho0 = self.rho0
 
         # Store FP value
         self.FP = FP
@@ -519,9 +568,9 @@ class Valve:
         delta_p_kPa = delta_p / 1000.0
 
         # Non-choked liquid flow coefficient (equation 1)
-        return flow_rate / (N1 * FP * (delta_p_kPa / gravity) ** 0.5)
+        return flow_rate /N1 * ((self.fluid.get_density()/rho0)/(delta_p_kPa))**0.5
 
-    def calculate_cv_liquid_choked(self, flow_rate, p1, gravity=1.0):
+    def calculate_cv_liquid_choked(self, flow_rate, delta_p):
         """
         Calculate Cv for choked liquid flow using equation 3 from ISA 75.01.
 
@@ -536,15 +585,16 @@ class Valve:
         N1 = self.N1
         FL = self.FL
         FP = self.FP if self.FP is not None else self.calculate_fp()
+        rho0 = self.rho0
 
         # Store FP value
         self.FP = FP
 
         # Convert pressure to kPa for calculation
-        p1_kPa = p1 / 1000.0
+        choking_delta_p_kPa =  self.choking_delta_p/1e3
 
         # Choked liquid flow coefficient (equation 3)
-        return flow_rate / (N1 * FL * FP * (p1_kPa / gravity) ** 0.5)
+        return flow_rate /N1 * ((self.fluid.get_density()/rho0)/(choking_delta_p_kPa)) ** 0.5
 
     def calculate_cv_gas_non_choked(self, flow_rate, p1, p2, T1, Z=1.0, MW=29.0):
         """
@@ -640,18 +690,20 @@ class Valve:
         self.FP = self.calculate_fp()
 
         # Check if flow is choked
-        self.is_choked = self.check_if_choked_liquid(delta_p, inlet_pressure)
+        self.is_choked, choking_delta_p = self.check_if_choked_liquid(delta_p, inlet_pressure)
 
         # Calculate initial Cv value
         if self.is_choked:
             self.flow_regime = "Choked flow"
-            self.Cv = self.calculate_cv_liquid_choked(flow_rate, inlet_pressure)
+            self.Kv = self.calculate_cv_liquid_choked(flow_rate, inlet_pressure)
         else:
             self.flow_regime = "Non-choked flow"
-            self.Cv = self.calculate_cv_liquid_non_choked(flow_rate, delta_p, inlet_pressure)
+            self.Kv = self.calculate_cv_liquid_non_choked(flow_rate, delta_p, inlet_pressure)
+
+        self.Cv = self.Kv * 1.156  # Conversion factor for metric units
 
         # Calculate Reynolds number
-        self.Reynolds_number = self.calculate_reynolds_number(flow_rate, self.Cv)
+        self.Reynolds_number = self.calculate_reynolds_number(flow_rate)
 
         # Iterative process for Reynolds number correction
         if self.Reynolds_number < 10000:
@@ -661,7 +713,7 @@ class Valve:
                 C_prime = 1.3 * self.Cv
 
                 # Calculate ReV using C'
-                ReV_prime = self.calculate_reynolds_number(flow_rate, C_prime)
+                ReV_prime = self.calculate_reynolds_number(flow_rate)
 
                 # Check condition for FR calculation method
                 if C_prime ** 2 > 0.016 * self.N19 * self.valve_diameter:
@@ -680,11 +732,13 @@ class Valve:
                 pass
 
         # Convert Cv to Kv
-        self.Kv = self.Cv / 1.156
+        self.valve_diameter = (4*(self.Kv/36000)/np.pi)**0.5  # Kv/36000 is Area in m^2
+        self.A = np.pi*(self.valve_diameter/2)**2
 
         return {
             "Cv": self.Cv,
             "Kv": self.Kv,
+            "Area": self.A,
             "flow_regime": self.flow_regime,
             "is_choked": self.is_choked,
             "Reynolds_number": self.Reynolds_number,
@@ -731,7 +785,7 @@ class Valve:
                                                        z_factor, molecular_weight)
 
         # Calculate Reynolds number
-        self.Reynolds_number = self.calculate_reynolds_number(flow_rate, self.Cv)
+        self.Reynolds_number = self.calculate_reynolds_number(flow_rate)
 
         # Iterative process for Reynolds number correction
         if self.Reynolds_number < 10000:
@@ -741,7 +795,7 @@ class Valve:
                 C_prime = 1.3 * self.Cv
 
                 # Calculate ReV using C'
-                ReV_prime = self.calculate_reynolds_number(flow_rate, C_prime)
+                ReV_prime = self.calculate_reynolds_number(flow_rate)
 
                 # Check condition for FR calculation method
                 if C_prime ** 2 > 0.016 * self.N19 * self.valve_diameter:
@@ -761,12 +815,16 @@ class Valve:
 
         # Convert Cv to Kv
         self.Kv = self.Cv / 1.156
+        self.valve_diameter = (4*(self.Kv/36000)/np.pi)**0.5  # Kv/36000 is Area in m^2
+        self.A = np.pi*(self.valve_diameter/2)**2
 
         return {
             "Cv": self.Cv,
             "Kv": self.Kv,
+            "Area": self.A,
             "flow_regime": self.flow_regime,
             "is_choked": self.is_choked,
+            "choking_delta_p": self.choking_delta_p,
             "Reynolds_number": self.Reynolds_number,
             "x": x,
             "Fk": Fk,
@@ -845,18 +903,11 @@ class Valve:
             FP = self.FP if self.FP is not None else self.calculate_fp()
 
             # Check if flow is choked
-            is_choked = delta_p >= ((self.FL * FP) ** 2) * inlet_pressure
-
-            # Convert pressure to kPa
-            delta_p_kPa = delta_p / 1000.0
-            inlet_pressure_kPa = inlet_pressure / 1000.0
-
-            # Calculate specific gravity
-            gravity = self.fluid.get_density() / 1000.0  # Approximation relative to water
+            is_choked = delta_p >= self.choking_delta_p
 
             if is_choked:
                 # Maximum flow rate for choked flow
-                return cv * self.N1 * self.FL * FP * (inlet_pressure_kPa / gravity) ** 0.5
+                return 3600*self.A*(self.choking_delta_p/self.fluid.get_density())** 0.5
             else:
                 # Maximum flow rate for non-choked flow
-                return cv * self.N1 * FP * (delta_p_kPa / gravity) ** 0.5
+                return 3600*self.A*(delta_p/self.fluid.get_density())** 0.5

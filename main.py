@@ -3,20 +3,35 @@ import numpy as np
 import matplotlib.pyplot as plt
 from classes import Fluid, ValveProperties, ValvePropertiesSelector, Valve
 
+st.set_page_config(
+    page_title="Control Valve Sizing",
+    layout="wide",
+    page_icon="🔧"
+)
+
+import streamlit as st
+import numpy as np
+
 if not 'Valve' in st.session_state:
     st.session_state['Valve'] = None
+if 'active_tab' not in st.session_state:
+    st.session_state['active_tab'] = 0
 
-st.title('Valve Sizing Calculator')
-st.markdown('This app calculates valve parameters based on flow conditions and generates a flow curve.')
+st.title("Control Valve Sizing Tool")
+st.markdown("*Based on ISA Standard 75.01.01-2007 for Industrial-Process Control Valves with CoolProp calculated fluid properties*")
 
 # Create tabs for input and results
-tab1, tab2 = st.tabs(["Input Parameters", "Results & Flow Curve"])
+if st.session_state['active_tab'] == 0:
+    tab1, tab2 = st.tabs(["Input Parameters", "Results & Flow Curve"])
+else:
+    tab2, tab1 = st.tabs(["Results & Flow Curve", "Input Parameters"])
+
 
 with tab1:
-    cols = st.columns([1, 1])
+    cols = st.columns([1, 1 ,1])
 
     with cols[0]:
-        st.subheader('Fluid')
+        st.subheader('Fluid and Inlet Conditions')
         coolprop_fluids = [
             "Water", "Air", "Nitrogen", "Oxygen", "Hydrogen", "CarbonDioxide", "Methane",
             "Ethane", "Propane", "Butane", "Ammonia", "R134a", "R22", "R410A", "Helium",
@@ -25,30 +40,31 @@ with tab1:
         fluid_name = st.selectbox('Select Fluid', coolprop_fluids)
         fluid_temperature = 273.15 + st.number_input('Inlet Temperature [°C]',
                                                      min_value=-30.0,
-                                                     value=20.0)
-        fluid_pressure = 1e5 * (1 + st.number_input('Inlet Pressure [barg]',
+                                                     value=90.0)
+        fluid_pressure = 1e5 * (st.number_input('Inlet Pressure [bar abs]',
                                                     min_value=1.0,
-                                                    value=6.0))
-
-        st.subheader('Flow Conditions')
-        flow_rate = st.number_input('Flow Rate [m³/h]',
-                                    min_value=0.1,
-                                    max_value=1000.0,
-                                    value=10.0)
-        outlet_pressure = 1e5 * (1 + st.number_input('Outlet Pressure [barg]',
-                                                     min_value=0.0,
-                                                     max_value=float(fluid_pressure / 1e5 - 0.1),
-                                                     value=1.0))
+                                                    value=6.8))
 
     with cols[1]:
+        st.subheader('Flow Outlet Conditions')
+        flow_rate = st.number_input('Flow Rate [m³/h]',
+                                    min_value=0.1,
+                                    max_value=10000.0,
+                                    value=360.0)
+        outlet_pressure = 1e5 * (st.number_input('Outlet Pressure [bar abs]',
+                                                     min_value=0.0,
+                                                     max_value=float(fluid_pressure / 1e5 - 0.1),
+                                                     value=2.2))
+
+    with cols[2]:
         st.subheader('Valve')
         valve_type = st.selectbox('Choose Valve Type', ValveProperties.get_all_valve_types())
         trim_type = st.selectbox('Choose Trim Type', ValveProperties.get_trim_types(valve_type))
         flow_direction = st.selectbox('Choose Flow Direction',
                                       ValveProperties.get_flow_directions(valve_type, trim_type))
-        pipe_size = 1e-3 * st.number_input('Pipe Size [mm]',
+        pipe_size = st.number_input('Pipe Size [mm]',
                                            min_value=1.0,
-                                           value=25.0)
+                                           value=150.0)
 
     # Create fluid and valve objects
     st.session_state['Valve'] = Valve(
@@ -64,7 +80,12 @@ with tab1:
     )
 
     # Add button to calculate valve parameters
-    calculate_button = st.button('Size Valve', type='primary')
+    def switch_to_results():
+        st.session_state.active_tab = "Results & Flow Curve"
+
+    calculate_button = st.button('Size Valve',
+                                 type='primary',
+                                 on_click=switch_to_results)
 
 # Results and flow curve tab
 with tab2:
@@ -78,29 +99,53 @@ with tab2:
         st.subheader('Valve Sizing Results')
 
         # Create columns for results
-        col1, col2 = st.columns(2)
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("Flow Coefficient (Cv)", f"{results['Cv']:.2f}")
-            st.metric("Flow Coefficient (Kv)", f"{results['Kv']:.2f}")
-            st.metric("Flow Regime", results['flow_regime'])
-            st.metric("Is Flow Choked?", "Yes" if results['is_choked'] else "No")
+            st.subheader('Inlet')
+            st.metric("Inlet Pressure [kPa]", f"{fluid_pressure / 1000:.1f}")
+            st.metric("Inlet Temperature [°C]", f"{valve.fluid.T - 273.15:.1f}")
+            st.metric("Density [kg/m³]", f"{valve.fluid.get_density():.1f}")
+            st.metric("Vapor Pressure [kPa]", f"{valve.fluid.get_vapour_pressure() / 1000:.1f}")
+            st.metric("Critical Pressure [kPa]", f"{valve.fluid.get_critical_pressure() / 1000:.1f}")
+            st.metric("Kinematic Viscosity [m²/s]", f"{valve.fluid.get_viscosity()/valve.fluid.get_density():.2e}")
 
         with col2:
-            st.metric("Reynolds Number", f"{results['Reynolds_number']:.0f}")
-            st.metric("Pipe Geometry Factor (FP)", f"{results['FP']:.3f}")
-            if 'FR' in results and results['FR'] is not None:
-                st.metric("Reynolds Number Factor (FR)", f"{results['FR']:.3f}")
+            st.subheader('Outlet')
+            st.metric("Outlet Pressure [kPa]", f"{outlet_pressure / 1000:.1f}")
+            st.metric("Pressure Drop [kPa]", f"{(fluid_pressure - outlet_pressure) / 1000:.1f}")
+            st.metric("Choking Pressure Drop [kPa]", f"{valve.choking_delta_p/1e3:.1f}")
+            st.metric("Liquid Pressure Recovery (FL)", f"{valve.FL:.3f}")
+            st.metric("Critical Pressure Ratio Factor (FF)", f"{valve.FF:.3f}")
             if 'x' in results:
                 st.metric("Pressure Drop Ratio (x)", f"{results['x']:.3f}")
             if 'Fk' in results:
                 st.metric("Fk Factor", f"{results['Fk']:.3f}")
+            st.metric("Flow Rate [m³/h]", f"{flow_rate:.1f}")
+
+        with col3:
+            st.subheader('Valve Dimensions')
+            st.metric("Pipe Size [mm]", f"{pipe_size:.1f}")
+            st.metric("Flow Coefficient (Cv)", f"{results['Cv']:.2f}")
+            st.metric("Flow Coefficient (Kv)", f"{results['Kv']:.2f}")
+            st.metric("Valve Area [mm²]", f"{results['Area'] * 1e6:.2f}")
+            st.metric("Valve Style Modifier (Fd)", f"{valve.Fd:.3f}")
+
+        with col4:
+            st.subheader('Flow Regime')
+            st.metric("Flow Regime", results['flow_regime'])
+            st.metric("Is Flow Choked?", "Yes" if results['is_choked'] else "No")
+            st.metric("Reynolds Number", f"{results['Reynolds_number']:.4e}")
+            st.metric("Pipe Geometry Factor (FP)", f"{results['FP']:.3f}")
+            if 'FR' in results and results['FR'] is not None:
+                st.metric("Reynolds Number Factor (FR)", f"{results['FR']:.3f}")
+
 
         # Generate flow curve: Q vs. dp
         st.subheader('Flow Curve: Q vs. Pressure Drop')
 
         # Create array of pressure drops (in bar)
-        delta_p_bar_array = np.linspace(0.1, max(7.0, (fluid_pressure - outlet_pressure) / 1e5), 50)
+        delta_p_bar_array = np.linspace(0.1, max(7.0, (fluid_pressure - outlet_pressure)*1.1 / 1e5), 50)
 
         # Calculate flow rates for each pressure drop
         flow_rates = []
